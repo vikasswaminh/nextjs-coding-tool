@@ -8,9 +8,13 @@ import ProjectsManager from '@/components/ProjectsManager';
 import FileTree from '@/components/FileTree';
 import AISuggestions from '@/components/AISuggestions';
 import AIRoleSelector from '@/components/AIRoleSelector';
+import ChatMessage from '@/components/ChatMessage';
+import { EditorPreferencesPanel, useEditorPreferences } from '@/components/EditorPreferences';
 import { useToast } from '@/components/ToastProvider';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -45,7 +49,26 @@ export default function Home() {
   const [aiRole, setAiRole] = useState('developer');
   const [aiSystemPrompt, setAiSystemPrompt] = useState('');
   const [user, setUser] = useState<any>(null);
+  const [showPreferences, setShowPreferences] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Editor preferences
+  const { preferences, updatePreferences } = useEditorPreferences();
+
+  // Auto-save with unsaved changes indicator
+  const { hasUnsavedChanges, forceSave } = useAutoSave({
+    content: editorContent,
+    fileName: activeFile,
+    onSave: async (content) => {
+      if (activeFile) {
+        await writeFile(activeFile, content);
+        showToast('File auto-saved', 'success');
+      }
+    },
+    delay: 2000,
+    enabled: true,
+  });
 
   // Load files on mount
   useEffect(() => {
@@ -65,6 +88,48 @@ export default function Home() {
     await supabase.auth.signOut();
     router.push('/auth/login');
   }
+
+  // Keyboard shortcuts
+  useKeyboardShortcuts({
+    shortcuts: [
+      {
+        key: 's',
+        ctrlOrCmd: true,
+        description: 'Save file',
+        action: () => {
+          if (activeFile) {
+            forceSave();
+          }
+        },
+      },
+      {
+        key: 'p',
+        ctrlOrCmd: true,
+        description: 'Open projects',
+        action: () => setShowProjectsManager(true),
+      },
+      {
+        key: 'k',
+        ctrlOrCmd: true,
+        shift: true,
+        description: 'Toggle preferences',
+        action: () => setShowPreferences(!showPreferences),
+      },
+      {
+        key: '/',
+        ctrlOrCmd: true,
+        description: 'Show keyboard shortcuts',
+        action: () => setShowShortcuts(!showShortcuts),
+      },
+      {
+        key: 'n',
+        ctrlOrCmd: true,
+        description: 'New file',
+        action: handleCreateFile,
+      },
+    ],
+    enabled: true,
+  });
 
   // Auto-scroll chat to bottom
   useEffect(() => {
@@ -417,9 +482,32 @@ export default function Home() {
 
       {/* Editor Panel */}
       <div className="flex-1 flex flex-col">
-        <div className="p-3 bg-gray-800 border-b border-gray-700">
-          <div className="text-sm font-medium">
-            {activeFile || 'No file selected'}
+        <div className="p-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium">
+              {activeFile || 'No file selected'}
+            </div>
+            {hasUnsavedChanges && (
+              <span className="text-xs text-yellow-400" title="Unsaved changes (auto-saving...)">
+                ● Unsaved
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowShortcuts(!showShortcuts)}
+              className="text-gray-400 hover:text-white text-xs px-2 py-1 rounded hover:bg-gray-700"
+              title="Keyboard shortcuts (Ctrl+/)"
+            >
+              ⌨️
+            </button>
+            <button
+              onClick={() => setShowPreferences(!showPreferences)}
+              className="text-gray-400 hover:text-white text-xs px-2 py-1 rounded hover:bg-gray-700"
+              title="Editor preferences (Ctrl+Shift+K)"
+            >
+              ⚙️
+            </button>
           </div>
         </div>
         <div className="flex-1">
@@ -427,15 +515,30 @@ export default function Home() {
             <Editor
               height="100%"
               defaultLanguage="typescript"
-              theme="vs-dark"
+              theme={preferences.theme}
               value={editorContent}
               onChange={handleEditorChange}
               options={{
-                minimap: { enabled: false },
-                fontSize: 14,
-                lineNumbers: 'on',
-                scrollBeyondLastLine: false,
+                fontSize: preferences.fontSize,
+                minimap: { enabled: preferences.minimap },
+                wordWrap: preferences.wordWrap ? 'on' : 'off',
+                lineNumbers: preferences.lineNumbers ? 'on' : 'off',
                 automaticLayout: true,
+                scrollBeyondLastLine: false,
+                tabSize: 2,
+                insertSpaces: true,
+                quickSuggestions: true,
+                suggestOnTriggerCharacters: true,
+                acceptSuggestionOnEnter: 'on',
+                tabCompletion: 'on',
+                wordBasedSuggestions: 'matchingDocuments',
+                folding: true,
+                foldingStrategy: 'indentation',
+                showFoldingControls: 'always',
+                matchBrackets: 'always',
+                bracketPairColorization: { enabled: true },
+                formatOnPaste: true,
+                formatOnType: true,
               }}
             />
           ) : (
@@ -523,19 +626,11 @@ export default function Home() {
         
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map((msg, idx) => (
-            <div
+            <ChatMessage
               key={idx}
-              className={`p-3 rounded ${
-                msg.role === 'user'
-                  ? 'bg-blue-900 ml-8'
-                  : 'bg-gray-700 mr-8'
-              }`}
-            >
-              <div className="text-xs font-semibold mb-1 text-gray-300">
-                {msg.role === 'user' ? 'You' : 'Assistant'}
-              </div>
-              <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
-            </div>
+              role={msg.role}
+              content={msg.content}
+            />
           ))}
           {streamingContent && (
             <div className="p-3 rounded bg-gray-700 mr-8">
@@ -628,6 +723,54 @@ export default function Home() {
                   <strong>Note:</strong> The CLI tool is a placeholder command. 
                   Implementation would require a separate npm package.
                 </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Editor Preferences Modal */}
+      {showPreferences && (
+        <EditorPreferencesPanel
+          preferences={preferences}
+          onUpdate={updatePreferences}
+          onClose={() => setShowPreferences(false)}
+        />
+      )}
+
+      {/* Keyboard Shortcuts Modal */}
+      {showShortcuts && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 max-w-md w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">Keyboard Shortcuts</h3>
+              <button
+                onClick={() => setShowShortcuts(false)}
+                className="text-gray-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Save file</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+S</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">New file</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+N</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Open projects</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+P</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Editor preferences</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+Shift+K</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Show shortcuts</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+/</kbd>
               </div>
             </div>
           </div>
