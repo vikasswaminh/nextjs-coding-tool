@@ -4,13 +4,34 @@ import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import { listFiles, getFile, writeFile, deleteFile, VFile } from '@/lib/vfs';
 import { applyOperations, revertChangeSet, ChangeSet, FileOperation } from '@/lib/applyOps';
+import ProjectsManager from '@/components/ProjectsManager';
+import FileTree from '@/components/FileTree';
+import AISuggestions from '@/components/AISuggestions';
+import AIRoleSelector from '@/components/AIRoleSelector';
+import ChatMessage from '@/components/ChatMessage';
+import { EditorPreferencesPanel, useEditorPreferences } from '@/components/EditorPreferences';
+import { useToast } from '@/components/ToastProvider';
+import { useRouter } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
 }
 
+interface SavedMessage {
+  id: string;
+  role: string;
+  content: string;
+  file_context: any;
+  created_at: string;
+}
+
 export default function Home() {
+  const { showToast } = useToast();
+  const router = useRouter();
   const [files, setFiles] = useState<VFile[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [editorContent, setEditorContent] = useState<string>('');
@@ -19,12 +40,96 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [lastChangeSet, setLastChangeSet] = useState<ChangeSet | null>(null);
+  const [pendingOperations, setPendingOperations] = useState<FileOperation[]>([]);
+  const [showProjectsManager, setShowProjectsManager] = useState(false);
+  const [currentProject, setCurrentProject] = useState<{ id: string; name: string } | null>(null);
+  const [showRunLocally, setShowRunLocally] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [aiRole, setAiRole] = useState('developer');
+  const [aiSystemPrompt, setAiSystemPrompt] = useState('');
+  const [user, setUser] = useState<any>(null);
+  const [showPreferences, setShowPreferences] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Editor preferences
+  const { preferences, updatePreferences } = useEditorPreferences();
+
+  // Auto-save with unsaved changes indicator
+  const { hasUnsavedChanges, forceSave } = useAutoSave({
+    content: editorContent,
+    fileName: activeFile,
+    onSave: async (content) => {
+      if (activeFile) {
+        await writeFile(activeFile, content);
+        showToast('File auto-saved', 'success');
+      }
+    },
+    delay: 2000,
+    enabled: true,
+  });
 
   // Load files on mount
   useEffect(() => {
+    checkUser();
     loadFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function checkUser() {
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    setUser(user);
+  }
+
+  async function handleSignOut() {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.push('/auth/login');
+  }
+
+  // Keyboard shortcuts
+  useKeyboardShortcuts({
+    shortcuts: [
+      {
+        key: 's',
+        ctrlOrCmd: true,
+        description: 'Save file',
+        action: () => {
+          if (activeFile) {
+            forceSave();
+          }
+        },
+      },
+      {
+        key: 'p',
+        ctrlOrCmd: true,
+        description: 'Open projects',
+        action: () => setShowProjectsManager(true),
+      },
+      {
+        key: 'k',
+        ctrlOrCmd: true,
+        shift: true,
+        description: 'Toggle preferences',
+        action: () => setShowPreferences(!showPreferences),
+      },
+      {
+        key: '/',
+        ctrlOrCmd: true,
+        description: 'Show keyboard shortcuts',
+        action: () => setShowShortcuts(!showShortcuts),
+      },
+      {
+        key: 'n',
+        ctrlOrCmd: true,
+        description: 'New file',
+        action: handleCreateFile,
+      },
+    ],
+    enabled: true,
+  });
 
   // Auto-scroll chat to bottom
   useEffect(() => {
@@ -37,6 +142,59 @@ export default function Home() {
       loadFileContent(activeFile);
     }
   }, [activeFile]);
+
+  // Load conversation when project changes
+  useEffect(() => {
+    if (currentProject) {
+      loadConversation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject]);
+
+  async function loadConversation() {
+    if (!currentProject) return;
+
+    try {
+      const response = await fetch(`/api/chat?projectId=${currentProject.id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setConversationId(data.conversation.id);
+        
+        // Load message history
+        const savedMessages: Message[] = data.messages.map((m: SavedMessage) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        }));
+        setMessages(savedMessages);
+      }
+    } catch (error) {
+      console.error('Error loading conversation:', error);
+    }
+  }
+
+  async function saveMessage(role: 'user' | 'assistant', content: string) {
+    if (!conversationId || !currentProject) return;
+
+    try {
+      const fileContext = {
+        files: files.map(f => ({ path: f.path, size: f.content.length })),
+        activeFile,
+      };
+
+      await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId,
+          role,
+          content,
+          fileContext,
+        }),
+      });
+    } catch (error) {
+      console.error('Error saving message:', error);
+    }
+  }
 
   async function loadFiles() {
     const allFiles = await listFiles();
@@ -88,6 +246,11 @@ export default function Home() {
     setIsStreaming(true);
     setStreamingContent('');
 
+    // Save user message to database
+    if (conversationId) {
+      await saveMessage('user', userMessage.content);
+    }
+
     try {
       // Get current files for context
       const allFiles = await listFiles();
@@ -102,6 +265,10 @@ export default function Home() {
         body: JSON.stringify({
           prompt: userMessage.content,
           files: fileContext,
+          conversationHistory: messages.slice(-10), // Last 10 messages
+          projectId: currentProject?.id,
+          aiRole,
+          systemPrompt: aiSystemPrompt,
         }),
       });
 
@@ -140,23 +307,37 @@ export default function Home() {
                 setStreamingContent((prev) => prev + parsedData.delta);
               } else if (eventType === 'result') {
                 // Apply operations
-                const { message, ops } = parsedData as {
+                const { message, ops, suggestions: aiSuggestions } = parsedData as {
                   message: string;
                   ops: FileOperation[];
+                  suggestions?: string[];
                 };
 
                 if (ops && ops.length > 0) {
+                  // Store pending operations instead of auto-applying
+                  setPendingOperations(ops);
                   const changeSet = await applyOperations(ops);
                   setLastChangeSet(changeSet);
                   await loadFiles();
                 }
 
+                // Store AI suggestions
+                if (aiSuggestions && aiSuggestions.length > 0) {
+                  setSuggestions(aiSuggestions);
+                }
+
                 // Replace streaming content with final message
+                const assistantMessage = { role: 'assistant' as const, content: message };
                 setMessages((prev) => [
                   ...prev,
-                  { role: 'assistant', content: message },
+                  assistantMessage,
                 ]);
                 setStreamingContent('');
+                
+                // Save assistant message to database
+                if (conversationId) {
+                  await saveMessage('assistant', message);
+                }
               } else if (eventType === 'error') {
                 const errorMsg = parsedData.raw
                   ? `Error: ${parsedData.error}\n\nRaw output:\n${parsedData.raw}`
@@ -189,6 +370,7 @@ export default function Home() {
       if (window.confirm('Revert the last AI change?')) {
         await revertChangeSet(lastChangeSet);
         setLastChangeSet(null);
+        setPendingOperations([]);
         await loadFiles();
         if (activeFile) {
           await loadFileContent(activeFile);
@@ -197,60 +379,135 @@ export default function Home() {
     }
   }
 
+  async function handleApplyToProject() {
+    if (!currentProject || pendingOperations.length === 0) {
+      showToast('No project selected or no pending changes', 'error');
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/projects/${currentProject.id}/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operations: pendingOperations }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to apply changes to project');
+      }
+
+      showToast('Changes applied to project successfully!', 'success');
+      setPendingOperations([]);
+    } catch (error) {
+      console.error('Error applying changes:', error);
+      showToast('Failed to apply changes to project', 'error');
+    }
+  }
+
+  async function handleLoadProject(projectId: string, projectName: string) {
+    try {
+      // Load project files
+      const response = await fetch(`/api/projects/${projectId}/files?includeContent=true`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to load project files');
+      }
+
+      const data = await response.json();
+      
+      // Clear current VFS and load project files
+      const currentFiles = await listFiles();
+      for (const file of currentFiles) {
+        await deleteFile(file.path);
+      }
+
+      // Load project files into VFS
+      for (const file of data.files) {
+        await writeFile(file.path, file.content);
+      }
+
+      setCurrentProject({ id: projectId, name: projectName });
+      setShowProjectsManager(false);
+      await loadFiles();
+      
+      if (data.files.length > 0) {
+        setActiveFile(data.files[0].path);
+      }
+      
+      showToast(`Loaded project: ${projectName}`, 'success');
+    } catch (error) {
+      console.error('Error loading project:', error);
+      showToast('Failed to load project', 'error');
+    }
+  }
+
   return (
     <div className="flex h-screen bg-gray-900 text-white">
       {/* File List Panel */}
       <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
         <div className="p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold mb-2">Files</h2>
-          <button
-            onClick={handleCreateFile}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm"
-          >
-            + New File
-          </button>
+          <h2 className="text-lg font-semibold mb-2">
+            {currentProject ? currentProject.name : 'Local Files'}
+          </h2>
+          <div className="space-y-2">
+            <button
+              onClick={() => setShowProjectsManager(true)}
+              className="w-full bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-sm"
+            >
+              📁 Projects
+            </button>
+            <button
+              onClick={handleCreateFile}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm"
+            >
+              + New File
+            </button>
+            {currentProject && (
+              <button
+                onClick={() => setShowRunLocally(true)}
+                className="w-full bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm"
+              >
+                ▶ Run Locally
+              </button>
+            )}
+          </div>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {files.length === 0 ? (
-            <div className="p-4 text-gray-400 text-sm">
-              No files yet. Create one to get started!
-            </div>
-          ) : (
-            <ul>
-              {files.map((file) => (
-                <li
-                  key={file.path}
-                  className={`flex items-center justify-between px-4 py-2 hover:bg-gray-700 cursor-pointer ${
-                    activeFile === file.path ? 'bg-gray-700' : ''
-                  }`}
-                >
-                  <span
-                    onClick={() => setActiveFile(file.path)}
-                    className="flex-1 truncate text-sm"
-                  >
-                    {file.path}
-                  </span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteFile(file.path);
-                    }}
-                    className="text-red-400 hover:text-red-300 text-xs ml-2"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <FileTree
+          files={files}
+          activeFile={activeFile}
+          onFileSelect={setActiveFile}
+          onFileDelete={handleDeleteFile}
+        />
       </div>
 
       {/* Editor Panel */}
       <div className="flex-1 flex flex-col">
-        <div className="p-3 bg-gray-800 border-b border-gray-700">
-          <div className="text-sm font-medium">
-            {activeFile || 'No file selected'}
+        <div className="p-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium">
+              {activeFile || 'No file selected'}
+            </div>
+            {hasUnsavedChanges && (
+              <span className="text-xs text-yellow-400" title="Unsaved changes (auto-saving...)">
+                ● Unsaved
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowShortcuts(!showShortcuts)}
+              className="text-gray-400 hover:text-white text-xs px-2 py-1 rounded hover:bg-gray-700"
+              title="Keyboard shortcuts (Ctrl+/)"
+            >
+              ⌨️
+            </button>
+            <button
+              onClick={() => setShowPreferences(!showPreferences)}
+              className="text-gray-400 hover:text-white text-xs px-2 py-1 rounded hover:bg-gray-700"
+              title="Editor preferences (Ctrl+Shift+K)"
+            >
+              ⚙️
+            </button>
           </div>
         </div>
         <div className="flex-1">
@@ -258,15 +515,30 @@ export default function Home() {
             <Editor
               height="100%"
               defaultLanguage="typescript"
-              theme="vs-dark"
+              theme={preferences.theme}
               value={editorContent}
               onChange={handleEditorChange}
               options={{
-                minimap: { enabled: false },
-                fontSize: 14,
-                lineNumbers: 'on',
-                scrollBeyondLastLine: false,
+                fontSize: preferences.fontSize,
+                minimap: { enabled: preferences.minimap },
+                wordWrap: preferences.wordWrap ? 'on' : 'off',
+                lineNumbers: preferences.lineNumbers ? 'on' : 'off',
                 automaticLayout: true,
+                scrollBeyondLastLine: false,
+                tabSize: 2,
+                insertSpaces: true,
+                quickSuggestions: true,
+                suggestOnTriggerCharacters: true,
+                acceptSuggestionOnEnter: 'on',
+                tabCompletion: 'on',
+                wordBasedSuggestions: 'matchingDocuments',
+                folding: true,
+                foldingStrategy: 'indentation',
+                showFoldingControls: 'always',
+                matchBrackets: 'always',
+                bracketPairColorization: { enabled: true },
+                formatOnPaste: true,
+                formatOnType: true,
               }}
             />
           ) : (
@@ -280,7 +552,31 @@ export default function Home() {
       {/* Chat Panel */}
       <div className="w-96 bg-gray-800 border-l border-gray-700 flex flex-col">
         <div className="p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold">AI Assistant</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">AI Assistant</h2>
+            {user && (
+              <div className="flex items-center gap-2">
+                <div className="text-xs text-gray-400">{user.email}</div>
+                <button
+                  onClick={handleSignOut}
+                  className="text-xs text-red-400 hover:text-red-300"
+                  title="Sign Out"
+                >
+                  Exit
+                </button>
+              </div>
+            )}
+          </div>
+          
+          <AIRoleSelector
+            selectedRole={aiRole}
+            onRoleChange={(role, prompt) => {
+              setAiRole(role);
+              setAiSystemPrompt(prompt);
+              showToast(`Switched to ${role} mode`, 'info');
+            }}
+          />
+          
           {lastChangeSet && (
             <button
               onClick={handleRevert}
@@ -289,22 +585,52 @@ export default function Home() {
               ⟲ Revert Last AI Change
             </button>
           )}
+          {currentProject && pendingOperations.length > 0 && (
+            <button
+              onClick={handleApplyToProject}
+              className="mt-2 w-full bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm"
+            >
+              ✓ Apply {pendingOperations.length} Change(s) to Project
+            </button>
+          )}
         </div>
+        
+        {/* AI Suggestions */}
+        {currentProject && (
+          <AISuggestions
+            projectId={currentProject.id}
+            onDismiss={() => {}}
+            onAccept={(suggestion) => {
+              setPrompt(suggestion.content);
+            }}
+          />
+        )}
+        
+        {/* Next Steps Suggestions */}
+        {suggestions.length > 0 && (
+          <div className="border-b border-gray-700 p-3 bg-green-900 bg-opacity-20">
+            <div className="text-xs font-semibold text-green-300 mb-2">📝 Suggested Next Steps</div>
+            <div className="space-y-1">
+              {suggestions.map((suggestion, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => setPrompt(suggestion)}
+                  className="w-full text-left text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 p-2 rounded border border-green-700"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map((msg, idx) => (
-            <div
+            <ChatMessage
               key={idx}
-              className={`p-3 rounded ${
-                msg.role === 'user'
-                  ? 'bg-blue-900 ml-8'
-                  : 'bg-gray-700 mr-8'
-              }`}
-            >
-              <div className="text-xs font-semibold mb-1 text-gray-300">
-                {msg.role === 'user' ? 'You' : 'Assistant'}
-              </div>
-              <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
-            </div>
+              role={msg.role}
+              content={msg.content}
+            />
           ))}
           {streamingContent && (
             <div className="p-3 rounded bg-gray-700 mr-8">
@@ -336,6 +662,120 @@ export default function Home() {
           </button>
         </form>
       </div>
+
+      {/* Projects Manager Modal */}
+      {showProjectsManager && (
+        <ProjectsManager
+          onProjectSelected={handleLoadProject}
+          onClose={() => setShowProjectsManager(false)}
+        />
+      )}
+
+      {/* Run Locally Modal */}
+      {showRunLocally && currentProject && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-8 max-w-2xl w-full mx-4">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-bold">Run Project Locally</h2>
+              <button
+                onClick={() => setShowRunLocally(false)}
+                className="text-gray-400 hover:text-white text-2xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <div>
+                <p className="text-gray-300 mb-4">
+                  To run this project locally, use the following command:
+                </p>
+                <div className="bg-gray-900 p-4 rounded border border-gray-700 font-mono text-sm">
+                  <code className="text-green-400">
+                    npx nextjs-coding-tool dev {currentProject.id}
+                  </code>
+                </div>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`npx nextjs-coding-tool dev ${currentProject.id}`);
+                    showToast('Command copied to clipboard!', 'success');
+                  }}
+                  className="mt-3 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm"
+                >
+                  📋 Copy Command
+                </button>
+              </div>
+
+              <div className="border-t border-gray-700 pt-4">
+                <p className="text-gray-400 text-sm mb-2">
+                  The CLI tool will:
+                </p>
+                <ul className="text-gray-400 text-sm list-disc list-inside space-y-1">
+                  <li>Download your project files from Supabase</li>
+                  <li>Set up a local development environment</li>
+                  <li>Start the Next.js development server</li>
+                  <li>Watch for changes and sync back to Supabase</li>
+                </ul>
+              </div>
+
+              <div className="bg-yellow-900 bg-opacity-30 border border-yellow-700 rounded p-3 text-sm">
+                <p className="text-yellow-200">
+                  <strong>Note:</strong> The CLI tool is a placeholder command. 
+                  Implementation would require a separate npm package.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Editor Preferences Modal */}
+      {showPreferences && (
+        <EditorPreferencesPanel
+          preferences={preferences}
+          onUpdate={updatePreferences}
+          onClose={() => setShowPreferences(false)}
+        />
+      )}
+
+      {/* Keyboard Shortcuts Modal */}
+      {showShortcuts && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 max-w-md w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">Keyboard Shortcuts</h3>
+              <button
+                onClick={() => setShowShortcuts(false)}
+                className="text-gray-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Save file</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+S</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">New file</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+N</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Open projects</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+P</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Editor preferences</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+Shift+K</kbd>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-400">Show shortcuts</span>
+                <kbd className="px-2 py-1 bg-gray-700 rounded text-xs font-mono">Ctrl+/</kbd>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

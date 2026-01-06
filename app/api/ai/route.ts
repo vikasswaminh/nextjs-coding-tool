@@ -3,29 +3,55 @@ import { NextRequest } from 'next/server';
 
 export const runtime = 'edge';
 
-const SYSTEM_PROMPT = `You are a coding assistant. When the user asks you to create or modify files, respond with:
-1. A brief message explaining what you're doing
-2. A JSON array of file operations
+const SYSTEM_PROMPT = `You are an expert coding assistant and proactive pair programmer. Your role is to:
 
-Format your response as:
+1. **Be conversational and helpful**: Engage naturally with the user, explain your reasoning, and ask clarifying questions when needed.
+
+2. **Suggest next steps**: After completing a task, proactively suggest logical next steps like:
+   - Adding tests for new features
+   - Improving error handling
+   - Optimizing performance
+   - Adding documentation
+   - Implementing related features
+
+3. **Maintain context**: You have access to the full project file structure and content. Reference specific files and code when making suggestions.
+
+4. **Be thorough**: When creating or modifying files:
+   - Write complete, production-ready code
+   - Include proper error handling
+   - Add helpful comments where needed
+   - Follow best practices and patterns used in the project
+
+5. **Response format**: When making file changes, respond with:
 {
-  "message": "Your explanation here",
+  "message": "Detailed explanation of what you did and why. Suggest 2-3 logical next steps the user might want to take.",
   "ops": [
-    { "op": "writeFile", "path": "file/path.ts", "content": "file content here" },
+    { "op": "writeFile", "path": "file/path.ts", "content": "complete file content" },
     { "op": "deleteFile", "path": "file/to/delete.ts" }
+  ],
+  "suggestions": [
+    "Next step 1: description",
+    "Next step 2: description",
+    "Next step 3: description"
   ]
 }
 
-Always respond with valid JSON in this exact format. The ops array should contain objects with:
-- op: either "writeFile" or "deleteFile"
-- path: the file path
-- content: the file content (only for writeFile)
+6. **When not making changes**: If the user asks a question or needs guidance, respond with:
+{
+  "message": "Your detailed, helpful response with suggestions",
+  "ops": [],
+  "suggestions": ["relevant next steps"]
+}
 
-Be concise and focused. Create complete, working code.`;
+Always respond with valid JSON. Be proactive, helpful, and suggest meaningful next steps.`;
 
 interface RequestBody {
   prompt: string;
   files: Array<{ path: string; content: string }>;
+  conversationHistory?: Array<{ role: string; content: string }>;
+  projectId?: string;
+  aiRole?: string;
+  systemPrompt?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -42,25 +68,33 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as RequestBody;
-    const { prompt, files } = body;
+    const { prompt, files, conversationHistory = [], systemPrompt } = body;
 
     const openai = new OpenAI({ apiKey });
 
-    // Build context from files
+    // Use custom system prompt if provided, otherwise use default
+    const finalSystemPrompt = systemPrompt || SYSTEM_PROMPT;
+
+    // Build context from files with file tree
+    const fileTree = files.map(f => f.path).sort().join('\n');
     const fileContext = files.length > 0
-      ? `\n\nCurrent files in the project:\n${files
+      ? `\n\nProject File Structure:\n${fileTree}\n\nFile Contents:\n${files
           .map((f) => `--- ${f.path} ---\n${f.content}`)
           .join('\n\n')}`
       : '';
 
     const userMessage = `${prompt}${fileContext}`;
 
+    // Build messages array with conversation history
+    const messages: any[] = [
+      { role: 'system', content: finalSystemPrompt },
+      ...conversationHistory.slice(-10), // Keep last 10 messages for context
+      { role: 'user', content: userMessage },
+    ];
+
     const stream = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
+      messages,
       stream: true,
       temperature: 0.7,
     });
