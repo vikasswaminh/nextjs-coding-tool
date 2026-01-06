@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import { listFiles, getFile, writeFile, deleteFile, VFile } from '@/lib/vfs';
 import { applyOperations, revertChangeSet, ChangeSet, FileOperation } from '@/lib/applyOps';
+import ProjectsManager from '@/components/ProjectsManager';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -19,6 +20,10 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [lastChangeSet, setLastChangeSet] = useState<ChangeSet | null>(null);
+  const [pendingOperations, setPendingOperations] = useState<FileOperation[]>([]);
+  const [showProjectsManager, setShowProjectsManager] = useState(false);
+  const [currentProject, setCurrentProject] = useState<{ id: string; name: string } | null>(null);
+  const [showRunLocally, setShowRunLocally] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Load files on mount
@@ -146,6 +151,8 @@ export default function Home() {
                 };
 
                 if (ops && ops.length > 0) {
+                  // Store pending operations instead of auto-applying
+                  setPendingOperations(ops);
                   const changeSet = await applyOperations(ops);
                   setLastChangeSet(changeSet);
                   await loadFiles();
@@ -189,6 +196,7 @@ export default function Home() {
       if (window.confirm('Revert the last AI change?')) {
         await revertChangeSet(lastChangeSet);
         setLastChangeSet(null);
+        setPendingOperations([]);
         await loadFiles();
         if (activeFile) {
           await loadFileContent(activeFile);
@@ -197,18 +205,96 @@ export default function Home() {
     }
   }
 
+  async function handleApplyToProject() {
+    if (!currentProject || pendingOperations.length === 0) {
+      alert('No project selected or no pending changes');
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/projects/${currentProject.id}/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operations: pendingOperations }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to apply changes to project');
+      }
+
+      alert('Changes applied to project successfully!');
+      setPendingOperations([]);
+    } catch (error) {
+      console.error('Error applying changes:', error);
+      alert('Failed to apply changes to project');
+    }
+  }
+
+  async function handleLoadProject(projectId: string, projectName: string) {
+    try {
+      // Load project files
+      const response = await fetch(`/api/projects/${projectId}/files?includeContent=true`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to load project files');
+      }
+
+      const data = await response.json();
+      
+      // Clear current VFS and load project files
+      const currentFiles = await listFiles();
+      for (const file of currentFiles) {
+        await deleteFile(file.path);
+      }
+
+      // Load project files into VFS
+      for (const file of data.files) {
+        await writeFile(file.path, file.content);
+      }
+
+      setCurrentProject({ id: projectId, name: projectName });
+      setShowProjectsManager(false);
+      await loadFiles();
+      
+      if (data.files.length > 0) {
+        setActiveFile(data.files[0].path);
+      }
+    } catch (error) {
+      console.error('Error loading project:', error);
+      alert('Failed to load project');
+    }
+  }
+
   return (
     <div className="flex h-screen bg-gray-900 text-white">
       {/* File List Panel */}
       <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
         <div className="p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold mb-2">Files</h2>
-          <button
-            onClick={handleCreateFile}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm"
-          >
-            + New File
-          </button>
+          <h2 className="text-lg font-semibold mb-2">
+            {currentProject ? currentProject.name : 'Local Files'}
+          </h2>
+          <div className="space-y-2">
+            <button
+              onClick={() => setShowProjectsManager(true)}
+              className="w-full bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-sm"
+            >
+              📁 Projects
+            </button>
+            <button
+              onClick={handleCreateFile}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm"
+            >
+              + New File
+            </button>
+            {currentProject && (
+              <button
+                onClick={() => setShowRunLocally(true)}
+                className="w-full bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm"
+              >
+                ▶ Run Locally
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {files.length === 0 ? (
@@ -289,6 +375,14 @@ export default function Home() {
               ⟲ Revert Last AI Change
             </button>
           )}
+          {currentProject && pendingOperations.length > 0 && (
+            <button
+              onClick={handleApplyToProject}
+              className="mt-2 w-full bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm"
+            >
+              ✓ Apply {pendingOperations.length} Change(s) to Project
+            </button>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map((msg, idx) => (
@@ -336,6 +430,72 @@ export default function Home() {
           </button>
         </form>
       </div>
+
+      {/* Projects Manager Modal */}
+      {showProjectsManager && (
+        <ProjectsManager
+          onProjectSelected={handleLoadProject}
+          onClose={() => setShowProjectsManager(false)}
+        />
+      )}
+
+      {/* Run Locally Modal */}
+      {showRunLocally && currentProject && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-8 max-w-2xl w-full mx-4">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-bold">Run Project Locally</h2>
+              <button
+                onClick={() => setShowRunLocally(false)}
+                className="text-gray-400 hover:text-white text-2xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <div>
+                <p className="text-gray-300 mb-4">
+                  To run this project locally, use the following command:
+                </p>
+                <div className="bg-gray-900 p-4 rounded border border-gray-700 font-mono text-sm">
+                  <code className="text-green-400">
+                    npx nextjs-coding-tool dev {currentProject.id}
+                  </code>
+                </div>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`npx nextjs-coding-tool dev ${currentProject.id}`);
+                    alert('Command copied to clipboard!');
+                  }}
+                  className="mt-3 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm"
+                >
+                  📋 Copy Command
+                </button>
+              </div>
+
+              <div className="border-t border-gray-700 pt-4">
+                <p className="text-gray-400 text-sm mb-2">
+                  The CLI tool will:
+                </p>
+                <ul className="text-gray-400 text-sm list-disc list-inside space-y-1">
+                  <li>Download your project files from Supabase</li>
+                  <li>Set up a local development environment</li>
+                  <li>Start the Next.js development server</li>
+                  <li>Watch for changes and sync back to Supabase</li>
+                </ul>
+              </div>
+
+              <div className="bg-yellow-900 bg-opacity-30 border border-yellow-700 rounded p-3 text-sm">
+                <p className="text-yellow-200">
+                  <strong>Note:</strong> The CLI tool is a placeholder command. 
+                  Implementation would require a separate npm package.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
