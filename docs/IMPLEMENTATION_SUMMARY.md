@@ -31,16 +31,22 @@
 
 **Features**:
 - Automatically redirects unauthenticated users to `/auth/login`
-- Redirects authenticated users away from `/auth/*` pages
-- Protects all routes except auth pages
-- Server-side session validation
-- Cookie-based authentication
+- Preserves intended destination with `?next=` parameter
+- Public route allowlist for auth pages (`/auth/login`, `/auth/signup`, `/auth/reset-password`, `/auth/callback`)
+- Excludes API routes from auth middleware (handled by route-level auth)
+- Server-side session validation using Supabase SSR
+- Cookie-based authentication with Edge runtime support
+- **Robust Error Handling**: Try-catch blocks prevent middleware crashes
+- **Fail-Open Behavior**: Allows requests through if environment variables are missing (prevents 500 errors)
+- **Edge Runtime Compatible**: No Node.js-only APIs, works on Vercel Edge
 
 **Important**: Requires environment variables to work:
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=your_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_key
 ```
+
+**Without these**, the middleware will log a warning and allow all requests through (fail-open) instead of crashing.
 
 ### 3. Database Schema Extensions
 
