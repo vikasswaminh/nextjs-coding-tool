@@ -5,11 +5,21 @@ import Editor from '@monaco-editor/react';
 import { listFiles, getFile, writeFile, deleteFile, VFile } from '@/lib/vfs';
 import { applyOperations, revertChangeSet, ChangeSet, FileOperation } from '@/lib/applyOps';
 import ProjectsManager from '@/components/ProjectsManager';
+import FileTree from '@/components/FileTree';
+import AISuggestions from '@/components/AISuggestions';
 import { useToast } from '@/components/ToastProvider';
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+}
+
+interface SavedMessage {
+  id: string;
+  role: string;
+  content: string;
+  file_context: any;
+  created_at: string;
 }
 
 export default function Home() {
@@ -26,6 +36,8 @@ export default function Home() {
   const [showProjectsManager, setShowProjectsManager] = useState(false);
   const [currentProject, setCurrentProject] = useState<{ id: string; name: string } | null>(null);
   const [showRunLocally, setShowRunLocally] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Load files on mount
@@ -44,6 +56,59 @@ export default function Home() {
       loadFileContent(activeFile);
     }
   }, [activeFile]);
+
+  // Load conversation when project changes
+  useEffect(() => {
+    if (currentProject) {
+      loadConversation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject]);
+
+  async function loadConversation() {
+    if (!currentProject) return;
+
+    try {
+      const response = await fetch(`/api/chat?projectId=${currentProject.id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setConversationId(data.conversation.id);
+        
+        // Load message history
+        const savedMessages: Message[] = data.messages.map((m: SavedMessage) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        }));
+        setMessages(savedMessages);
+      }
+    } catch (error) {
+      console.error('Error loading conversation:', error);
+    }
+  }
+
+  async function saveMessage(role: 'user' | 'assistant', content: string) {
+    if (!conversationId || !currentProject) return;
+
+    try {
+      const fileContext = {
+        files: files.map(f => ({ path: f.path, size: f.content.length })),
+        activeFile,
+      };
+
+      await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId,
+          role,
+          content,
+          fileContext,
+        }),
+      });
+    } catch (error) {
+      console.error('Error saving message:', error);
+    }
+  }
 
   async function loadFiles() {
     const allFiles = await listFiles();
@@ -95,6 +160,11 @@ export default function Home() {
     setIsStreaming(true);
     setStreamingContent('');
 
+    // Save user message to database
+    if (conversationId) {
+      await saveMessage('user', userMessage.content);
+    }
+
     try {
       // Get current files for context
       const allFiles = await listFiles();
@@ -109,6 +179,8 @@ export default function Home() {
         body: JSON.stringify({
           prompt: userMessage.content,
           files: fileContext,
+          conversationHistory: messages.slice(-10), // Last 10 messages
+          projectId: currentProject?.id,
         }),
       });
 
@@ -147,9 +219,10 @@ export default function Home() {
                 setStreamingContent((prev) => prev + parsedData.delta);
               } else if (eventType === 'result') {
                 // Apply operations
-                const { message, ops } = parsedData as {
+                const { message, ops, suggestions: aiSuggestions } = parsedData as {
                   message: string;
                   ops: FileOperation[];
+                  suggestions?: string[];
                 };
 
                 if (ops && ops.length > 0) {
@@ -160,12 +233,23 @@ export default function Home() {
                   await loadFiles();
                 }
 
+                // Store AI suggestions
+                if (aiSuggestions && aiSuggestions.length > 0) {
+                  setSuggestions(aiSuggestions);
+                }
+
                 // Replace streaming content with final message
+                const assistantMessage = { role: 'assistant' as const, content: message };
                 setMessages((prev) => [
                   ...prev,
-                  { role: 'assistant', content: message },
+                  assistantMessage,
                 ]);
                 setStreamingContent('');
+                
+                // Save assistant message to database
+                if (conversationId) {
+                  await saveMessage('assistant', message);
+                }
               } else if (eventType === 'error') {
                 const errorMsg = parsedData.raw
                   ? `Error: ${parsedData.error}\n\nRaw output:\n${parsedData.raw}`
@@ -300,40 +384,12 @@ export default function Home() {
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {files.length === 0 ? (
-            <div className="p-4 text-gray-400 text-sm">
-              No files yet. Create one to get started!
-            </div>
-          ) : (
-            <ul>
-              {files.map((file) => (
-                <li
-                  key={file.path}
-                  className={`flex items-center justify-between px-4 py-2 hover:bg-gray-700 cursor-pointer ${
-                    activeFile === file.path ? 'bg-gray-700' : ''
-                  }`}
-                >
-                  <span
-                    onClick={() => setActiveFile(file.path)}
-                    className="flex-1 truncate text-sm"
-                  >
-                    {file.path}
-                  </span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteFile(file.path);
-                    }}
-                    className="text-red-400 hover:text-red-300 text-xs ml-2"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <FileTree
+          files={files}
+          activeFile={activeFile}
+          onFileSelect={setActiveFile}
+          onFileDelete={handleDeleteFile}
+        />
       </div>
 
       {/* Editor Panel */}
@@ -388,6 +444,36 @@ export default function Home() {
             </button>
           )}
         </div>
+        
+        {/* AI Suggestions */}
+        {currentProject && (
+          <AISuggestions
+            projectId={currentProject.id}
+            onDismiss={() => {}}
+            onAccept={(suggestion) => {
+              setPrompt(suggestion.content);
+            }}
+          />
+        )}
+        
+        {/* Next Steps Suggestions */}
+        {suggestions.length > 0 && (
+          <div className="border-b border-gray-700 p-3 bg-green-900 bg-opacity-20">
+            <div className="text-xs font-semibold text-green-300 mb-2">📝 Suggested Next Steps</div>
+            <div className="space-y-1">
+              {suggestions.map((suggestion, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => setPrompt(suggestion)}
+                  className="w-full text-left text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 p-2 rounded border border-green-700"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map((msg, idx) => (
             <div
