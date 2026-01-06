@@ -7,7 +7,10 @@ import { applyOperations, revertChangeSet, ChangeSet, FileOperation } from '@/li
 import ProjectsManager from '@/components/ProjectsManager';
 import FileTree from '@/components/FileTree';
 import AISuggestions from '@/components/AISuggestions';
+import AIRoleSelector from '@/components/AIRoleSelector';
 import { useToast } from '@/components/ToastProvider';
+import { useRouter } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -24,6 +27,7 @@ interface SavedMessage {
 
 export default function Home() {
   const { showToast } = useToast();
+  const router = useRouter();
   const [files, setFiles] = useState<VFile[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [editorContent, setEditorContent] = useState<string>('');
@@ -38,12 +42,29 @@ export default function Home() {
   const [showRunLocally, setShowRunLocally] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [aiRole, setAiRole] = useState('developer');
+  const [aiSystemPrompt, setAiSystemPrompt] = useState('');
+  const [user, setUser] = useState<any>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Load files on mount
   useEffect(() => {
+    checkUser();
     loadFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function checkUser() {
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    setUser(user);
+  }
+
+  async function handleSignOut() {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.push('/auth/login');
+  }
 
   // Auto-scroll chat to bottom
   useEffect(() => {
@@ -181,6 +202,8 @@ export default function Home() {
           files: fileContext,
           conversationHistory: messages.slice(-10), // Last 10 messages
           projectId: currentProject?.id,
+          aiRole,
+          systemPrompt: aiSystemPrompt,
         }),
       });
 
@@ -426,7 +449,31 @@ export default function Home() {
       {/* Chat Panel */}
       <div className="w-96 bg-gray-800 border-l border-gray-700 flex flex-col">
         <div className="p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold">AI Assistant</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">AI Assistant</h2>
+            {user && (
+              <div className="flex items-center gap-2">
+                <div className="text-xs text-gray-400">{user.email}</div>
+                <button
+                  onClick={handleSignOut}
+                  className="text-xs text-red-400 hover:text-red-300"
+                  title="Sign Out"
+                >
+                  Exit
+                </button>
+              </div>
+            )}
+          </div>
+          
+          <AIRoleSelector
+            selectedRole={aiRole}
+            onRoleChange={(role, prompt) => {
+              setAiRole(role);
+              setAiSystemPrompt(prompt);
+              showToast(`Switched to ${role} mode`, 'info');
+            }}
+          />
+          
           {lastChangeSet && (
             <button
               onClick={handleRevert}

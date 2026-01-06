@@ -50,6 +50,8 @@ interface RequestBody {
   files: Array<{ path: string; content: string }>;
   conversationHistory?: Array<{ role: string; content: string }>;
   projectId?: string;
+  aiRole?: string;
+  systemPrompt?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -66,9 +68,12 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as RequestBody;
-    const { prompt, files, conversationHistory = [] } = body;
+    const { prompt, files, conversationHistory = [], systemPrompt } = body;
 
     const openai = new OpenAI({ apiKey });
+
+    // Use custom system prompt if provided, otherwise use default
+    const finalSystemPrompt = systemPrompt || SYSTEM_PROMPT;
 
     // Build context from files with file tree
     const fileTree = files.map(f => f.path).sort().join('\n');
@@ -82,7 +87,7 @@ export async function POST(req: NextRequest) {
 
     // Build messages array with conversation history
     const messages: any[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: finalSystemPrompt },
       ...conversationHistory.slice(-10), // Keep last 10 messages for context
       { role: 'user', content: userMessage },
     ];

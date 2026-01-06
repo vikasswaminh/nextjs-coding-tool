@@ -39,6 +39,26 @@ CREATE TABLE IF NOT EXISTS cli_tokens (
   revoked_at TIMESTAMPTZ
 );
 
+-- Create user_profiles table for extended user data
+CREATE TABLE IF NOT EXISTS user_profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  full_name TEXT,
+  avatar_url TEXT,
+  default_ai_role TEXT DEFAULT 'developer', -- developer, debugger, builder, architect, etc.
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Create ai_role_prompts table for customizable AI behaviors
+CREATE TABLE IF NOT EXISTS ai_role_prompts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  role_name TEXT NOT NULL UNIQUE,
+  system_prompt TEXT NOT NULL,
+  description TEXT,
+  icon TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Create chat_conversations table for storing AI chat history
 CREATE TABLE IF NOT EXISTS chat_conversations (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -77,6 +97,8 @@ CREATE INDEX IF NOT EXISTS idx_project_changesets_project_id ON project_changese
 CREATE INDEX IF NOT EXISTS idx_project_changesets_created_at ON project_changesets(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cli_tokens_owner_id ON cli_tokens(owner_id);
 CREATE INDEX IF NOT EXISTS idx_cli_tokens_token_hash ON cli_tokens(token_hash) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_user_profiles_id ON user_profiles(id);
+CREATE INDEX IF NOT EXISTS idx_ai_role_prompts_role_name ON ai_role_prompts(role_name);
 CREATE INDEX IF NOT EXISTS idx_chat_conversations_project_id ON chat_conversations(project_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_id ON chat_messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_created_at ON chat_messages(created_at DESC);
@@ -88,6 +110,8 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE project_files ENABLE ROW LEVEL SECURITY;
 ALTER TABLE project_changesets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cli_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_role_prompts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai_suggestions ENABLE ROW LEVEL SECURITY;
@@ -211,6 +235,25 @@ CREATE POLICY "Users can delete own tokens"
   ON cli_tokens FOR DELETE
   USING (auth.uid() = owner_id);
 
+-- RLS Policies for user_profiles table
+CREATE POLICY "Users can view own profile"
+  ON user_profiles FOR SELECT
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can insert own profile"
+  ON user_profiles FOR INSERT
+  WITH CHECK (auth.uid() = id);
+
+CREATE POLICY "Users can update own profile"
+  ON user_profiles FOR UPDATE
+  USING (auth.uid() = id)
+  WITH CHECK (auth.uid() = id);
+
+-- RLS Policies for ai_role_prompts table (public read, admin write)
+CREATE POLICY "Anyone can view AI role prompts"
+  ON ai_role_prompts FOR SELECT
+  USING (true);
+
 -- RLS Policies for chat_conversations table
 CREATE POLICY "Users can view conversations in own projects"
   ON chat_conversations FOR SELECT
@@ -317,3 +360,18 @@ CREATE TRIGGER update_chat_conversations_updated_at
   BEFORE UPDATE ON chat_conversations
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_user_profiles_updated_at
+  BEFORE UPDATE ON user_profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- Insert default AI role prompts
+INSERT INTO ai_role_prompts (role_name, system_prompt, description, icon) VALUES
+('developer', 'You are an expert software developer and pair programmer. Focus on writing clean, maintainable code with proper error handling and best practices. Suggest tests, documentation, and code improvements.', 'General purpose coding assistant', '👨‍💻'),
+('debugger', 'You are an expert debugger. Analyze code carefully to find bugs, performance issues, and potential errors. Explain the root cause and provide fixes with detailed reasoning.', 'Specialized in finding and fixing bugs', '🐛'),
+('builder', 'You are a full-stack builder focused on rapid prototyping and implementation. Create complete, working features quickly while maintaining code quality. Prioritize getting things working end-to-end.', 'Rapid feature implementation', '🏗️'),
+('architect', 'You are a software architect. Focus on system design, scalability, patterns, and best practices. Provide high-level guidance on structure, organization, and technical decisions.', 'System design and architecture', '🏛️'),
+('optimizer', 'You are a performance optimization expert. Analyze code for efficiency, suggest improvements for speed and memory usage, and help implement optimizations.', 'Performance and optimization', '⚡'),
+('security', 'You are a security expert. Review code for vulnerabilities, suggest security best practices, and help implement secure authentication, authorization, and data handling.', 'Security analysis and hardening', '🔒')
+ON CONFLICT (role_name) DO NOTHING;
