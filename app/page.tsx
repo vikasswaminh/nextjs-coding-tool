@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
-import { listFiles, getFile, writeFile, VFile } from '@/lib/vfs';
+import { listFiles, getFile, writeFile, deleteFile, VFile } from '@/lib/vfs';
 import { applyOperations, revertChangeSet, ChangeSet, FileOperation } from '@/lib/applyOps';
 
 interface Message {
@@ -69,7 +69,6 @@ export default function Home() {
 
   async function handleDeleteFile(path: string) {
     if (window.confirm(`Delete ${path}?`)) {
-      const { deleteFile } = await import('@/lib/vfs');
       await deleteFile(path);
       await loadFiles();
       if (activeFile === path) {
@@ -134,7 +133,10 @@ export default function Home() {
               const [, eventType, data] = eventMatch;
               const parsedData = JSON.parse(data);
 
-              if (eventType === 'token') {
+              if (eventType === 'status') {
+                // Status event - could be used for UI feedback
+                console.log('Status:', parsedData.status);
+              } else if (eventType === 'token') {
                 setStreamingContent((prev) => prev + parsedData.delta);
               } else if (eventType === 'result') {
                 // Apply operations
