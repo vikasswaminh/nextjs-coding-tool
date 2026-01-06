@@ -5,6 +5,7 @@ import Editor from '@monaco-editor/react';
 import { listFiles, getFile, writeFile, deleteFile, VFile } from '@/lib/vfs';
 import { applyOperations, revertChangeSet, ChangeSet, FileOperation } from '@/lib/applyOps';
 import ProjectsManager from '@/components/ProjectsManager';
+import { useToast } from '@/components/ToastProvider';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -12,6 +13,7 @@ interface Message {
 }
 
 export default function Home() {
+  const { showToast } = useToast();
   const [files, setFiles] = useState<VFile[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [editorContent, setEditorContent] = useState<string>('');
@@ -207,7 +209,7 @@ export default function Home() {
 
   async function handleApplyToProject() {
     if (!currentProject || pendingOperations.length === 0) {
-      alert('No project selected or no pending changes');
+      showToast('No project selected or no pending changes', 'error');
       return;
     }
 
@@ -222,11 +224,11 @@ export default function Home() {
         throw new Error('Failed to apply changes to project');
       }
 
-      alert('Changes applied to project successfully!');
+      showToast('Changes applied to project successfully!', 'success');
       setPendingOperations([]);
     } catch (error) {
       console.error('Error applying changes:', error);
-      alert('Failed to apply changes to project');
+      showToast('Failed to apply changes to project', 'error');
     }
   }
 
@@ -259,9 +261,11 @@ export default function Home() {
       if (data.files.length > 0) {
         setActiveFile(data.files[0].path);
       }
+      
+      showToast(`Loaded project: ${projectName}`, 'success');
     } catch (error) {
       console.error('Error loading project:', error);
-      alert('Failed to load project');
+      showToast('Failed to load project', 'error');
     }
   }
 
@@ -466,7 +470,7 @@ export default function Home() {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(`npx nextjs-coding-tool dev ${currentProject.id}`);
-                    alert('Command copied to clipboard!');
+                    showToast('Command copied to clipboard!', 'success');
                   }}
                   className="mt-3 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm"
                 >

@@ -21,7 +21,7 @@ export default function ProjectsManager({ onProjectSelected, onClose }: Projects
   const [creating, setCreating] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<{ id: string; email?: string } | null>(null);
 
   useEffect(() => {
     checkAuth();

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import bcrypt from 'bcryptjs';
 
 interface RouteParams {
@@ -9,7 +10,7 @@ interface RouteParams {
 }
 
 // Helper to verify CLI token
-async function verifyCliToken(supabase: any, token: string) {
+async function verifyCliToken(supabase: SupabaseClient, token: string): Promise<string | null> {
   const { data: tokens } = await supabase
     .from('cli_tokens')
     .select('token_hash, owner_id')
